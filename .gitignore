@@ -1,0 +1,6 @@
+# Ignora toda a pasta build (e todo o seu conteúdo)
+kml-google
+
+# Ignora arquivos específicos na raiz do repositório
+repeticoes.sh
+zonas.sql
