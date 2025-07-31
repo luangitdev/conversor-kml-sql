@@ -38,12 +38,53 @@ def process_kml_file(kml_path):
             print(f"✅ Arquivo processado com sucesso: {output_file_name}")
             return True
         else:
-            print(f"⚠️ Arquivo processado com avisos: {output_file_name}")
-            return True
+            print(f"❌ Erro: Nenhum placemark válido encontrado no arquivo {kml_path}")
+            return False
             
     except Exception as e:
         print(f"❌ Erro ao escrever arquivo de saída {output_file_name}: {e}")
         return False
+
+def _extract_layer_name(placemark, kml_namespace):
+    """
+    Extrai o nome da camada de um placemark, buscando em SimpleData, description ou Data.
+    
+    Args:
+        placemark: Elemento placemark do XML
+        kml_namespace (str): Namespace do KML
+    
+    Returns:
+        str or None: Nome da camada encontrado ou None se não encontrar
+    """
+    # Prioridade 1: Busca em SimpleData[@name='layer']
+    layer_element = placemark.find(f".//{kml_namespace}SimpleData[@name='layer']")
+    if layer_element is not None and layer_element.text:
+        return layer_element.text.strip()
+    
+    # Prioridade 2: Busca em description
+    description_element = placemark.find(f".//{kml_namespace}description")
+    if description_element is not None and description_element.text:
+        description_text = description_element.text.strip()
+        # Remove possível sufixo " / UF" (ex: "JUAZEIRO DO NORTE / CE" -> "JUAZEIRO DO NORTE")
+        if ' / ' in description_text:
+            return description_text.split(' / ')[0].strip()
+        return description_text
+    
+    # Prioridade 3: Busca em Data[@name='Description'] (formato Google Earth)
+    data_description = placemark.find(f".//{kml_namespace}Data[@name='Description']/{kml_namespace}value")
+    if data_description is not None and data_description.text:
+        description_text = data_description.text.strip()
+        # Remove possível sufixo " / UF" (ex: "ACOPIARA / CE" -> "ACOPIARA")
+        if ' / ' in description_text:
+            return description_text.split(' / ')[0].strip()
+        return description_text
+    
+    # Prioridade 4: Busca em Data[@name='Name'] (formato Google Earth)
+    data_name = placemark.find(f".//{kml_namespace}Data[@name='Name']/{kml_namespace}value")
+    if data_name is not None and data_name.text:
+        return data_name.text.strip()
+    
+    return None
 
 def _process_placemarks(root, kml_namespace, kml_path, out_file):
     """
@@ -67,23 +108,16 @@ def _process_placemarks(root, kml_namespace, kml_path, out_file):
     for index, placemark in enumerate(placemarks, start=1):
         print(f"Processando Placemark {index}/{len(placemarks)} do arquivo {kml_path}")
 
-        # Extrai o nome
-        name_element = placemark.find(f'.//{kml_namespace}SimpleData[@name="layer"]')
-        if name_element is not None:
-            name = name_element.text
-            print(f"Nome: {name}")
+        # Extrai o nome da camada usando a função auxiliar
+        layer = _extract_layer_name(placemark, kml_namespace)
+        if layer:
+            print(f"Layer encontrado: {layer}")
         else:
-            print("Placemark sem nome. Pulando...")
-            continue  # Ignora marcadores sem nome
+            print("Placemark sem camada válida. Pulando...")
+            continue
 
-        # Extrai a camada
-        layer_element = placemark.find(f".//{kml_namespace}SimpleData[@name='layer']")
-        if layer_element is not None:
-            layer = layer_element.text
-            print(f"Layer: {layer}")
-        else:
-            print("Placemark sem camada. Pulando...")
-            continue  # Ignora marcadores sem camada
+        # Usa o layer como nome também (compatibilidade com código anterior)
+        name = layer
 
         # Extrai coordenadas
         coordinates_element = placemark.find(f'.//{kml_namespace}coordinates')
@@ -144,19 +178,39 @@ def process_directory(directory_path):
     kml_files = get_kml_files_from_directory(directory_path)
     
     if not kml_files:
-        return {"total": 0, "success": 0, "errors": 0}
+        return {"total": 0, "success": 0, "errors": 0, "no_valid_layers": 0}
     
-    stats = {"total": len(kml_files), "success": 0, "errors": 0}
+    stats = {"total": len(kml_files), "success": 0, "errors": 0, "no_valid_layers": 0}
     
     print(f"\n🚀 Iniciando processamento de {len(kml_files)} arquivos...\n")
     
     for i, kml_file in enumerate(kml_files, 1):
         print(f"📄 [{i}/{len(kml_files)}] Processando: {os.path.basename(kml_file)}")
         
-        if process_kml_file(kml_file):
+        result = process_kml_file(kml_file)
+        if result:
             stats["success"] += 1
         else:
-            stats["errors"] += 1
+            # Se process_kml_file retornou False, pode ser erro de parsing ou sem layers válidos
+            # Vamos verificar qual foi a causa real
+            try:
+                tree = ET.parse(kml_file)
+                root = tree.getroot()
+                kml_namespace = "{http://www.opengis.net/kml/2.2}"
+                placemarks = root.findall(f'.//{kml_namespace}Placemark')
+                
+                if len(placemarks) > 0:
+                    # Arquivo válido mas sem layers válidos (já foi detectado em process_kml_file)
+                    stats["no_valid_layers"] += 1
+                    print(f"⚠️ Arquivo {os.path.basename(kml_file)}: Nenhum layer válido encontrado")
+                else:
+                    # Arquivo válido mas sem placemarks
+                    stats["errors"] += 1
+                    print(f"❌ Arquivo {os.path.basename(kml_file)}: Sem placemarks válidos")
+            except Exception as parse_error:
+                # Erro real de parsing XML
+                stats["errors"] += 1
+                print(f"❌ Arquivo {os.path.basename(kml_file)}: Erro de parsing XML - {str(parse_error)}")
         
         print("-" * 50)
     
@@ -174,7 +228,8 @@ def print_summary(stats):
     print("=" * 50)
     print(f"Total de arquivos: {stats['total']}")
     print(f"✅ Processados com sucesso: {stats['success']}")
-    print(f"❌ Erros: {stats['errors']}")
+    print(f"⚠️ Sem layers válidos: {stats['no_valid_layers']}")
+    print(f"❌ Erros de parsing: {stats['errors']}")
     
     if stats['total'] > 0:
         success_rate = (stats['success'] / stats['total']) * 100
@@ -237,7 +292,7 @@ def main():
         print(f"📁 Processando diretório: {args.directory}")
         stats = process_directory(args.directory)
         print_summary(stats)
-        return 0 if stats["errors"] == 0 else 1
+        return 0 if (stats["errors"] + stats["no_valid_layers"]) == 0 else 1
 
 if __name__ == '__main__':
     exit(main())
