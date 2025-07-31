@@ -4,3 +4,4 @@ kml-google
 # Ignora arquivos específicos na raiz do repositório
 repeticoes.sh
 zonas.sql
+output_inserts_*
