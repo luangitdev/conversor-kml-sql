@@ -5,3 +5,7 @@ kml-google
 repeticoes.sh
 zonas.sql
 output_inserts_*
+
+# Ignora arquivos temporários da aplicação web
+uploads/
+results/
