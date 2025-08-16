@@ -56,12 +56,17 @@ def _extract_layer_name(placemark, kml_namespace):
     Returns:
         str or None: Nome da camada encontrado ou None se não encontrar
     """
-    # Prioridade 1: Busca em SimpleData[@name='layer']
+    # Prioridade 1: Busca em Data[@name='zona'] (formato específico do usuário)
+    data_zona = placemark.find(f".//{kml_namespace}Data[@name='zona']/{kml_namespace}value")
+    if data_zona is not None and data_zona.text:
+        return data_zona.text.strip()
+    
+    # Prioridade 2: Busca em SimpleData[@name='layer']
     layer_element = placemark.find(f".//{kml_namespace}SimpleData[@name='layer']")
     if layer_element is not None and layer_element.text:
         return layer_element.text.strip()
     
-    # Prioridade 2: Busca em description
+    # Prioridade 3: Busca em description
     description_element = placemark.find(f".//{kml_namespace}description")
     if description_element is not None and description_element.text:
         description_text = description_element.text.strip()
@@ -70,7 +75,7 @@ def _extract_layer_name(placemark, kml_namespace):
             return description_text.split(' / ')[0].strip()
         return description_text
     
-    # Prioridade 3: Busca em Data[@name='Description'] (formato Google Earth)
+    # Prioridade 4: Busca em Data[@name='Description'] (formato Google Earth)
     data_description = placemark.find(f".//{kml_namespace}Data[@name='Description']/{kml_namespace}value")
     if data_description is not None and data_description.text:
         description_text = data_description.text.strip()
@@ -79,12 +84,87 @@ def _extract_layer_name(placemark, kml_namespace):
             return description_text.split(' / ')[0].strip()
         return description_text
     
-    # Prioridade 4: Busca em Data[@name='Name'] (formato Google Earth)
+    # Prioridade 5: Busca em Data[@name='Name'] (formato Google Earth)
     data_name = placemark.find(f".//{kml_namespace}Data[@name='Name']/{kml_namespace}value")
     if data_name is not None and data_name.text:
         return data_name.text.strip()
     
     return None
+
+def _validate_kml_structure(root, kml_namespace, kml_path):
+    """
+    Valida a estrutura do arquivo KML e identifica possíveis problemas.
+    
+    Args:
+        root: Elemento raiz do XML
+        kml_namespace (str): Namespace do KML
+        kml_path (str): Caminho do arquivo KML (para logs)
+    
+    Returns:
+        dict: {"valid": bool, "warnings": list, "errors": list}
+    """
+    validation_result = {"valid": True, "warnings": [], "errors": []}
+    
+    # Encontra todos os placemarks
+    placemarks = root.findall(f'.//{kml_namespace}Placemark')
+    
+    if len(placemarks) == 0:
+        validation_result["errors"].append("Nenhum Placemark encontrado no arquivo")
+        validation_result["valid"] = False
+        return validation_result
+    
+    for index, placemark in enumerate(placemarks, start=1):
+        placemark_issues = []
+        
+        # Verifica ExtendedData
+        extended_data = placemark.find(f'.//{kml_namespace}ExtendedData')
+        if extended_data is not None:
+            # Verifica se ExtendedData está bem formado
+            data_elements = extended_data.findall(f'.//{kml_namespace}Data')
+            if len(data_elements) == 0:
+                placemark_issues.append("ExtendedData vazio ou malformado")
+            else:
+                # Verifica se os Data elements têm value
+                for data_elem in data_elements:
+                    name_attr = data_elem.get('name')
+                    value_elem = data_elem.find(f'{kml_namespace}value')
+                    if name_attr and value_elem is None:
+                        placemark_issues.append(f"Data[@name='{name_attr}'] sem elemento <value>")
+                    elif name_attr and value_elem is not None and not value_elem.text:
+                        placemark_issues.append(f"Data[@name='{name_attr}'] com <value> vazio")
+        
+        # Verifica se tem layer identificável
+        layer = _extract_layer_name(placemark, kml_namespace)
+        if not layer:
+            placemark_issues.append("Nenhum layer/nome identificável encontrado")
+        
+        # Verifica coordenadas
+        coordinates_element = placemark.find(f'.//{kml_namespace}coordinates')
+        if coordinates_element is None:
+            placemark_issues.append("Elemento <coordinates> não encontrado")
+        elif not coordinates_element.text or not coordinates_element.text.strip():
+            placemark_issues.append("Elemento <coordinates> vazio")
+        else:
+            # Valida formato das coordenadas
+            coords_text = coordinates_element.text.strip()
+            coord_matches = re.findall(r'(-?\d+\.\d+),(-?\d+\.\d+)', coords_text)
+            if len(coord_matches) == 0:
+                placemark_issues.append("Nenhuma coordenada válida encontrada")
+        
+        # Verifica estrutura XML do placemark
+        linestring = placemark.find(f'.//{kml_namespace}LineString')
+        if linestring is None:
+            placemark_issues.append("Elemento <LineString> não encontrado")
+        
+        # Se há problemas, adiciona aos avisos/erros
+        if placemark_issues:
+            if layer:  # Se conseguiu extrair layer, é aviso
+                validation_result["warnings"].append(f"Placemark {index} ('{layer}'): {', '.join(placemark_issues)}")
+            else:  # Sem layer é erro mais grave
+                validation_result["errors"].append(f"Placemark {index}: {', '.join(placemark_issues)}")
+                validation_result["valid"] = False
+    
+    return validation_result
 
 def _process_placemarks(root, kml_namespace, kml_path, out_file):
     """
@@ -99,6 +179,22 @@ def _process_placemarks(root, kml_namespace, kml_path, out_file):
     Returns:
         bool: True se pelo menos um placemark foi processado
     """
+    # Valida a estrutura do arquivo primeiro
+    validation = _validate_kml_structure(root, kml_namespace, kml_path)
+    
+    # Exibe avisos se houver
+    if validation["warnings"]:
+        print("⚠️ Avisos encontrados no arquivo:")
+        for warning in validation["warnings"]:
+            print(f"   {warning}")
+    
+    # Exibe erros se houver
+    if validation["errors"]:
+        print("❌ Erros encontrados no arquivo:")
+        for error in validation["errors"]:
+            print(f"   {error}")
+        print("💡 Dica: Verifique se todas as tags XML estão fechadas corretamente")
+    
     # Encontra as coordenadas
     placemarks = root.findall(f'.//{kml_namespace}Placemark')
     print(f"Encontrados {len(placemarks)} placemarks no arquivo KML {kml_path}.")
