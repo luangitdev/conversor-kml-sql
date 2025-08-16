@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  kml-to-sql-web:
+    build: .
+    container_name: kml-to-sql-converter
+    ports:
+      - "5000:5000"
+    volumes:
+      # Mount volumes for persistent data
+      - ./uploads:/app/uploads
+      - ./results:/app/results
+    environment:
+      - FLASK_ENV=production
+      - PYTHONPATH=/app
+    restart: unless-stopped
+    networks:
+      - kml-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.kml-converter.rule=Host(`kml-converter.local`)"
+      - "traefik.http.services.kml-converter.loadbalancer.server.port=5000"
+
+networks:
+  kml-network:
+    driver: bridge
