@@ -84,10 +84,12 @@ def _extract_layer_name(placemark, kml_namespace):
             return description_text.split(' / ')[0].strip()
         return description_text
     
-    # Prioridade 5: Busca em Data[@name='Name'] (formato Google Earth)
-    data_name = placemark.find(f".//{kml_namespace}Data[@name='Name']/{kml_namespace}value")
-    if data_name is not None and data_name.text:
-        return data_name.text.strip()
+    # Prioridade 5: Busca em Data[@name='Name'] (formato Google Earth) - case-insensitive
+    # Tenta diferentes variações de case
+    for name_attr in ['Name', 'NAME', 'name']:
+        data_name = placemark.find(f".//{kml_namespace}Data[@name='{name_attr}']/{kml_namespace}value")
+        if data_name is not None and data_name.text:
+            return data_name.text.strip()
     
     return None
 
