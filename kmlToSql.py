@@ -3,6 +3,105 @@ import xml.etree.ElementTree as ET
 import re
 import argparse
 import glob
+import math
+
+DEFAULT_SIMPLIFICATION_TOLERANCE = 0.0001
+
+
+def _get_simplification_tolerance():
+    """
+    Obtém a tolerância de simplificação das coordenadas.
+
+    A unidade é grau decimal. O padrão 0.0001 equivale a aproximadamente 11m
+    em latitude, reduzindo pontos redundantes sem deformar muito a geometria.
+    """
+    raw_value = os.getenv("KML_SIMPLIFY_TOLERANCE")
+    if not raw_value:
+        return DEFAULT_SIMPLIFICATION_TOLERANCE
+
+    try:
+        tolerance = float(raw_value)
+        if tolerance < 0:
+            raise ValueError
+        return tolerance
+    except ValueError:
+        print(
+            "⚠️ Valor inválido em KML_SIMPLIFY_TOLERANCE. "
+            f"Usando padrão {DEFAULT_SIMPLIFICATION_TOLERANCE}."
+        )
+        return DEFAULT_SIMPLIFICATION_TOLERANCE
+
+
+def _perpendicular_distance(point, start, end):
+    """
+    Calcula a distância perpendicular de um ponto a uma reta.
+
+    Os pontos são tuplas no formato (longitude, latitude).
+    """
+    if start == end:
+        return math.hypot(point[0] - start[0], point[1] - start[1])
+
+    numerator = abs(
+        (end[0] - start[0]) * (start[1] - point[1])
+        - (start[0] - point[0]) * (end[1] - start[1])
+    )
+    denominator = math.hypot(end[0] - start[0], end[1] - start[1])
+    return numerator / denominator
+
+
+def _ramer_douglas_peucker(points, tolerance):
+    """
+    Simplifica uma sequência de pontos com Ramer-Douglas-Peucker.
+    """
+    if len(points) <= 2:
+        return points[:]
+
+    max_distance = 0.0
+    farthest_index = 0
+
+    for index in range(1, len(points) - 1):
+        distance = _perpendicular_distance(points[index], points[0], points[-1])
+        if distance > max_distance:
+            max_distance = distance
+            farthest_index = index
+
+    if max_distance > tolerance:
+        left = _ramer_douglas_peucker(points[:farthest_index + 1], tolerance)
+        right = _ramer_douglas_peucker(points[farthest_index:], tolerance)
+        return left[:-1] + right
+
+    return [points[0], points[-1]]
+
+
+def _simplify_coordinates(coordinates, tolerance=None):
+    """
+    Reduz pontos redundantes mantendo o desenho geral da geometria.
+
+    Se a sequência vier fechada (primeiro ponto igual ao último), ela é
+    simplificada sem o ponto duplicado e fechada novamente no final.
+    """
+    if tolerance is None:
+        tolerance = _get_simplification_tolerance()
+
+    if tolerance <= 0 or len(coordinates) <= 2:
+        return coordinates[:]
+
+    is_closed = len(coordinates) > 2 and coordinates[0] == coordinates[-1]
+    points_to_simplify = coordinates[:-1] if is_closed else coordinates
+
+    minimum_points = 3 if is_closed else 2
+    if len(points_to_simplify) <= minimum_points:
+        return coordinates[:]
+
+    simplified = _ramer_douglas_peucker(points_to_simplify, tolerance)
+
+    if is_closed:
+        if len(simplified) < 3:
+            simplified = points_to_simplify[:3]
+        if simplified[0] != simplified[-1]:
+            simplified.append(simplified[0])
+
+    return simplified
 
 def process_kml_file(kml_path):
     """
@@ -149,7 +248,7 @@ def _validate_kml_structure(root, kml_namespace, kml_path):
         else:
             # Valida formato das coordenadas
             coords_text = coordinates_element.text.strip()
-            coord_matches = re.findall(r'(-?\d+\.\d+),(-?\d+\.\d+)', coords_text)
+            coord_matches = re.findall(r'(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)', coords_text)
             if len(coord_matches) == 0:
                 placemark_issues.append("Nenhuma coordenada válida encontrada")
         
@@ -220,8 +319,23 @@ def _process_placemarks(root, kml_namespace, kml_path, out_file):
         # Extrai coordenadas
         coordinates_element = placemark.find(f'.//{kml_namespace}coordinates')
         if coordinates_element is not None:
-            coordinates = coordinates_element.text.strip()
-            coordinates = re.findall(r'(-?\d+\.\d+),(-?\d+\.\d+)', coordinates)
+            coordinates_text = coordinates_element.text.strip()
+            coordinates = [
+                (float(lon), float(lat))
+                for lon, lat in re.findall(r'(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)', coordinates_text)
+            ]
+
+            if not coordinates:
+                print("Placemark sem coordenadas válidas. Pulando...")
+                continue
+
+            original_point_count = len(coordinates)
+            coordinates = _simplify_coordinates(coordinates)
+            removed_point_count = original_point_count - len(coordinates)
+            print(
+                f"Simplificação de pontos: {original_point_count} -> {len(coordinates)} "
+                f"({removed_point_count} removidos)"
+            )
 
             # Escreve o insert da zona no arquivo de saída
             out_file.write(f"INSERT INTO zona (custofixo, custoporentrega, nome, restrita, utilizaexpediente, utilizapernoite, agrupavel, tipo_solucao, sequencia, tipo_zona) "
@@ -229,10 +343,10 @@ def _process_placemarks(root, kml_namespace, kml_path, out_file):
                            f"(SELECT 1 FROM zona WHERE nome = '{layer}');\n")
 
             # Escreve os inserts das coordenadas no arquivo de saída
-            for (lat, lon) in coordinates:
-                print(f"Insert gerado para {name}, {layer}, Lat: {lon}, Lon: {lat}")
+            for longitude, latitude in coordinates:
+                print(f"Insert gerado para {name}, {layer}, Lat: {latitude}, Lon: {longitude}")
                 out_file.write(f"INSERT INTO coordenada(latitude, longitude, id_zona) "
-                               f"VALUES({lon}, {lat}, (SELECT id FROM zona WHERE nome = '{layer}'));\n")
+                               f"VALUES({latitude}, {longitude}, (SELECT id FROM zona WHERE nome = '{layer}'));\n")
             
             processed_count += 1
         else:
