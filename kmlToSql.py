@@ -189,7 +189,16 @@ def _extract_layer_name(placemark, kml_namespace):
         data_name = placemark.find(f".//{kml_namespace}Data[@name='{name_attr}']/{kml_namespace}value")
         if data_name is not None and data_name.text:
             return data_name.text.strip()
-    
+
+    # Prioridade 6: Busca em <name> do próprio Placemark (formato Google Earth / regioes_v9)
+    name_element = placemark.find(f"{kml_namespace}name")
+    if name_element is not None and name_element.text:
+        name_text = name_element.text.strip()
+        # Remove prefixo "Zona: " se existir (ex: "Zona: CAMPO_MOURAO" -> "CAMPO_MOURAO")
+        if name_text.lower().startswith("zona:"):
+            return name_text[5:].strip()
+        return name_text
+
     return None
 
 def _validate_kml_structure(root, kml_namespace, kml_path):
@@ -252,10 +261,15 @@ def _validate_kml_structure(root, kml_namespace, kml_path):
             if len(coord_matches) == 0:
                 placemark_issues.append("Nenhuma coordenada válida encontrada")
         
-        # Verifica estrutura XML do placemark
-        linestring = placemark.find(f'.//{kml_namespace}LineString')
-        if linestring is None:
-            placemark_issues.append("Elemento <LineString> não encontrado")
+        # Verifica estrutura XML do placemark - aceita LineString, Polygon, Point ou MultiGeometry
+        has_geometry = (
+            placemark.find(f'.//{kml_namespace}LineString') is not None or
+            placemark.find(f'.//{kml_namespace}Polygon') is not None or
+            placemark.find(f'.//{kml_namespace}Point') is not None or
+            placemark.find(f'.//{kml_namespace}MultiGeometry') is not None
+        )
+        if not has_geometry:
+            placemark_issues.append("Nenhum elemento de geometria válido encontrado (LineString, Polygon, Point ou MultiGeometry)")
         
         # Se há problemas, adiciona aos avisos/erros
         if placemark_issues:
@@ -266,6 +280,73 @@ def _validate_kml_structure(root, kml_namespace, kml_path):
                 validation_result["valid"] = False
     
     return validation_result
+
+def _extract_coordinates(placemark, kml_namespace):
+    """
+    Extrai coordenadas de um Placemark, suportando LineString, Polygon e MultiGeometry.
+    Ignora Point pois são apenas marcações de referência, não zonas.
+
+    Args:
+        placemark: Elemento placemark do XML
+        kml_namespace (str): Namespace do KML
+
+    Returns:
+        list: Lista de tuplas (longitude, latitude)
+    """
+    coordinates = []
+
+    # Prioridade 1: LineString
+    linestring = placemark.find(f'.//{kml_namespace}LineString')
+    if linestring is not None:
+        coords_elem = linestring.find(f'{kml_namespace}coordinates')
+        if coords_elem is not None and coords_elem.text:
+            text = coords_elem.text.strip()
+            coordinates = [
+                (float(lon), float(lat))
+                for lon, lat in re.findall(r'(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)', text)
+            ]
+        return coordinates
+
+    # Prioridade 2: Polygon (outerBoundaryIs > LinearRing)
+    polygon = placemark.find(f'.//{kml_namespace}Polygon')
+    if polygon is not None:
+        coords_elem = polygon.find(
+            f'{kml_namespace}outerBoundaryIs/{kml_namespace}LinearRing/{kml_namespace}coordinates'
+        )
+        if coords_elem is not None and coords_elem.text:
+            text = coords_elem.text.strip()
+            coordinates = [
+                (float(lon), float(lat))
+                for lon, lat in re.findall(r'(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)', text)
+            ]
+        return coordinates
+
+    # Prioridade 3: MultiGeometry (concatena todos os LineString e Polygon)
+    multigeom = placemark.find(f'.//{kml_namespace}MultiGeometry')
+    if multigeom is not None:
+        for geom in (
+            multigeom.findall(f'{kml_namespace}LineString') +
+            multigeom.findall(f'{kml_namespace}Polygon')
+        ):
+            coords_elem = None
+            if geom.tag == f'{kml_namespace}LineString':
+                coords_elem = geom.find(f'{kml_namespace}coordinates')
+            else:  # Polygon
+                coords_elem = geom.find(
+                    f'{kml_namespace}outerBoundaryIs/{kml_namespace}LinearRing/{kml_namespace}coordinates'
+                )
+
+            if coords_elem is not None and coords_elem.text:
+                text = coords_elem.text.strip()
+                coords = [
+                    (float(lon), float(lat))
+                    for lon, lat in re.findall(r'(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)', text)
+                ]
+                coordinates.extend(coords)
+        return coordinates
+
+    # Não processa Point (são marcações de cidade, não zonas)
+    return []
 
 def _process_placemarks(root, kml_namespace, kml_path, out_file):
     """
@@ -317,40 +398,32 @@ def _process_placemarks(root, kml_namespace, kml_path, out_file):
         name = layer
 
         # Extrai coordenadas
-        coordinates_element = placemark.find(f'.//{kml_namespace}coordinates')
-        if coordinates_element is not None:
-            coordinates_text = coordinates_element.text.strip()
-            coordinates = [
-                (float(lon), float(lat))
-                for lon, lat in re.findall(r'(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)', coordinates_text)
-            ]
+        coordinates = _extract_coordinates(placemark, kml_namespace)
 
-            if not coordinates:
-                print("Placemark sem coordenadas válidas. Pulando...")
-                continue
+        if not coordinates:
+            print("Placemark sem coordenadas válidas. Pulando...")
+            continue
 
-            original_point_count = len(coordinates)
-            coordinates = _simplify_coordinates(coordinates)
-            removed_point_count = original_point_count - len(coordinates)
-            print(
-                f"Simplificação de pontos: {original_point_count} -> {len(coordinates)} "
-                f"({removed_point_count} removidos)"
-            )
+        original_point_count = len(coordinates)
+        coordinates = _simplify_coordinates(coordinates)
+        removed_point_count = original_point_count - len(coordinates)
+        print(
+            f"Simplificação de pontos: {original_point_count} -> {len(coordinates)} "
+            f"({removed_point_count} removidos)"
+        )
 
-            # Escreve o insert da zona no arquivo de saída
-            out_file.write(f"INSERT INTO zona (custofixo, custoporentrega, nome, restrita, utilizaexpediente, utilizapernoite, agrupavel, tipo_solucao, sequencia, tipo_zona) "
-                           f"SELECT 0, 0, '{layer}', 'true', 'false', 'false', 'false', 'TODAS', 99999, 'SIMULACAO' WHERE NOT EXISTS "
-                           f"(SELECT 1 FROM zona WHERE nome = '{layer}');\n")
+        # Escreve o insert da zona no arquivo de saída
+        out_file.write(f"INSERT INTO zona (custofixo, custoporentrega, nome, restrita, utilizaexpediente, utilizapernoite, agrupavel, tipo_solucao, sequencia, tipo_zona) "
+                       f"SELECT 0, 0, '{layer}', 'true', 'false', 'false', 'false', 'TODAS', 99999, 'SIMULACAO' WHERE NOT EXISTS "
+                       f"(SELECT 1 FROM zona WHERE nome = '{layer}');\n")
 
-            # Escreve os inserts das coordenadas no arquivo de saída
-            for longitude, latitude in coordinates:
-                print(f"Insert gerado para {name}, {layer}, Lat: {latitude}, Lon: {longitude}")
-                out_file.write(f"INSERT INTO coordenada(latitude, longitude, id_zona) "
-                               f"VALUES({latitude}, {longitude}, (SELECT id FROM zona WHERE nome = '{layer}'));\n")
-            
-            processed_count += 1
-        else:
-            print("Placemark sem coordenadas. Pulando...")
+        # Escreve os inserts das coordenada no arquivo de saída
+        for longitude, latitude in coordinates:
+            print(f"Insert gerado para {name}, {layer}, Lat: {latitude}, Lon: {longitude}")
+            out_file.write(f"INSERT INTO coordenada(latitude, longitude, id_zona) "
+                           f"VALUES({latitude}, {longitude}, (SELECT id FROM zona WHERE nome = '{layer}'));\n")
+
+        processed_count += 1
     
     return processed_count > 0
 
