@@ -103,6 +103,41 @@ def _simplify_coordinates(coordinates, tolerance=None):
 
     return simplified
 
+TRUNCATED_KML_SUFFIXES = ("</Document></kml>", "</kml>", "</Document>")
+
+
+def _parse_kml(kml_path):
+    """
+    Faz o parse de um KML, tolerando arquivo truncado.
+
+    Se o XML estiver incompleto, tenta fechar as tags finais (Document/kml)
+    em memória, sem alterar o arquivo. Se nenhuma tentativa funcionar, relança
+    o erro original do parse.
+
+    Returns:
+        Element: elemento raiz do XML
+    """
+    try:
+        return ET.parse(kml_path).getroot()
+    except ET.ParseError as original_error:
+        with open(kml_path, encoding="utf-8", errors="replace") as kml_file:
+            content = kml_file.read().rstrip()
+
+        for suffix in TRUNCATED_KML_SUFFIXES:
+            try:
+                root = ET.fromstring(content + suffix)
+            except ET.ParseError:
+                continue
+            print(
+                f"⚠️ KML truncado em {kml_path}: tags finais ausentes, "
+                f"fechadas automaticamente com '{suffix}'. "
+                "Confirme com o cliente se o arquivo não perdeu Placemarks."
+            )
+            return root
+
+        raise original_error
+
+
 def process_kml_file(kml_path):
     """
     Processa um único arquivo KML e gera o arquivo SQL correspondente.
@@ -119,8 +154,7 @@ def process_kml_file(kml_path):
     
     # KML parse
     try:
-        tree = ET.parse(kml_path)
-        root = tree.getroot()
+        root = _parse_kml(kml_path)
     except Exception as e:
         print(f"Erro ao fazer o parse do arquivo KML {kml_path}: {e}")
         return False
@@ -184,8 +218,8 @@ def _extract_layer_name(placemark, kml_namespace):
         return description_text
     
     # Prioridade 5: Busca em Data[@name='Name'] (formato Google Earth) - case-insensitive
-    # Tenta diferentes variações de case
-    for name_attr in ['Name', 'NAME', 'name']:
+    # Tenta diferentes variações de case; NM_UF é o formato IBGE (nome da UF)
+    for name_attr in ['Name', 'NAME', 'name', 'NM_UF']:
         data_name = placemark.find(f".//{kml_namespace}Data[@name='{name_attr}']/{kml_namespace}value")
         if data_name is not None and data_name.text:
             return data_name.text.strip()
@@ -281,10 +315,25 @@ def _validate_kml_structure(root, kml_namespace, kml_path):
     
     return validation_result
 
+def _parse_coordinates_text(text):
+    """
+    Converte o texto de uma tag <coordinates> em lista de tuplas (longitude, latitude).
+    """
+    return [
+        (float(lon), float(lat))
+        for lon, lat in re.findall(r'(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)', text)
+    ]
+
+
 def _extract_coordinates(placemark, kml_namespace):
     """
     Extrai coordenadas de um Placemark, suportando LineString, Polygon e MultiGeometry.
     Ignora Point pois são apenas marcações de referência, não zonas.
+
+    Quando o Placemark tem mais de uma geometria (ex: MultiGeometry com
+    continente + ilhas), mantém apenas a maior (por número de pontos) para não
+    gerar linhas falsas ligando o fim de uma geometria ao início da outra.
+    As descartadas são informadas no log.
 
     Args:
         placemark: Elemento placemark do XML
@@ -293,60 +342,38 @@ def _extract_coordinates(placemark, kml_namespace):
     Returns:
         list: Lista de tuplas (longitude, latitude)
     """
-    coordinates = []
+    candidates = []
 
-    # Prioridade 1: LineString
-    linestring = placemark.find(f'.//{kml_namespace}LineString')
-    if linestring is not None:
+    for linestring in placemark.iter(f'{kml_namespace}LineString'):
         coords_elem = linestring.find(f'{kml_namespace}coordinates')
         if coords_elem is not None and coords_elem.text:
-            text = coords_elem.text.strip()
-            coordinates = [
-                (float(lon), float(lat))
-                for lon, lat in re.findall(r'(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)', text)
-            ]
-        return coordinates
+            candidates.append(_parse_coordinates_text(coords_elem.text))
 
-    # Prioridade 2: Polygon (outerBoundaryIs > LinearRing)
-    polygon = placemark.find(f'.//{kml_namespace}Polygon')
-    if polygon is not None:
+    for polygon in placemark.iter(f'{kml_namespace}Polygon'):
         coords_elem = polygon.find(
             f'{kml_namespace}outerBoundaryIs/{kml_namespace}LinearRing/{kml_namespace}coordinates'
         )
         if coords_elem is not None and coords_elem.text:
-            text = coords_elem.text.strip()
-            coordinates = [
-                (float(lon), float(lat))
-                for lon, lat in re.findall(r'(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)', text)
-            ]
-        return coordinates
+            candidates.append(_parse_coordinates_text(coords_elem.text))
 
-    # Prioridade 3: MultiGeometry (concatena todos os LineString e Polygon)
-    multigeom = placemark.find(f'.//{kml_namespace}MultiGeometry')
-    if multigeom is not None:
-        for geom in (
-            multigeom.findall(f'{kml_namespace}LineString') +
-            multigeom.findall(f'{kml_namespace}Polygon')
-        ):
-            coords_elem = None
-            if geom.tag == f'{kml_namespace}LineString':
-                coords_elem = geom.find(f'{kml_namespace}coordinates')
-            else:  # Polygon
-                coords_elem = geom.find(
-                    f'{kml_namespace}outerBoundaryIs/{kml_namespace}LinearRing/{kml_namespace}coordinates'
-                )
+    candidates = [coords for coords in candidates if coords]
+    if not candidates:
+        return []
 
-            if coords_elem is not None and coords_elem.text:
-                text = coords_elem.text.strip()
-                coords = [
-                    (float(lon), float(lat))
-                    for lon, lat in re.findall(r'(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)', text)
-                ]
-                coordinates.extend(coords)
-        return coordinates
+    if len(candidates) == 1:
+        return candidates[0]
 
-    # Não processa Point (são marcações de cidade, não zonas)
-    return []
+    largest = max(candidates, key=len)
+    discarded_sizes = sorted(
+        (len(coords) for coords in candidates if coords is not largest),
+        reverse=True,
+    )
+    print(
+        f"⚠️ Placemark com {len(candidates)} geometrias: mantida a maior "
+        f"({len(largest)} pts), descartadas {len(discarded_sizes)} "
+        f"({', '.join(f'{size} pts' for size in discarded_sizes)})"
+    )
+    return largest
 
 def _process_placemarks(root, kml_namespace, kml_path, out_file):
     """
@@ -479,8 +506,7 @@ def process_directory(directory_path):
             # Se process_kml_file retornou False, pode ser erro de parsing ou sem layers válidos
             # Vamos verificar qual foi a causa real
             try:
-                tree = ET.parse(kml_file)
-                root = tree.getroot()
+                root = _parse_kml(kml_file)
                 kml_namespace = "{http://www.opengis.net/kml/2.2}"
                 placemarks = root.findall(f'.//{kml_namespace}Placemark')
                 
