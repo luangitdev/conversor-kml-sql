@@ -138,12 +138,13 @@ def _parse_kml(kml_path):
         raise original_error
 
 
-def process_kml_file(kml_path):
+def process_kml_file(kml_path, planner=False):
     """
     Processa um único arquivo KML e gera o arquivo SQL correspondente.
     
     Args:
         kml_path (str): Caminho para o arquivo KML
+        planner (bool): Gera os inserts no formato Planner
     
     Returns:
         bool: True se processado com sucesso, False caso contrário
@@ -165,7 +166,7 @@ def process_kml_file(kml_path):
     try:
         # Cria o arquivo de saída (sobrescreve se já existir)
         with open(output_file_name, 'w') as out_file:
-            success = _process_placemarks(root, kml_namespace, kml_path, out_file)
+            success = _process_placemarks(root, kml_namespace, kml_path, out_file, planner)
             
         if success:
             print(f"✅ Arquivo processado com sucesso: {output_file_name}")
@@ -375,7 +376,7 @@ def _extract_coordinates(placemark, kml_namespace):
     )
     return largest
 
-def _process_placemarks(root, kml_namespace, kml_path, out_file):
+def _process_placemarks(root, kml_namespace, kml_path, out_file, planner=False):
     """
     Processa todos os placemarks de um arquivo KML.
     
@@ -384,6 +385,7 @@ def _process_placemarks(root, kml_namespace, kml_path, out_file):
         kml_namespace (str): Namespace do KML
         kml_path (str): Caminho do arquivo KML (para logs)
         out_file: Handle do arquivo de saída
+        planner (bool): Gera os inserts no formato Planner
     
     Returns:
         bool: True se pelo menos um placemark foi processado
@@ -440,14 +442,21 @@ def _process_placemarks(root, kml_namespace, kml_path, out_file):
         )
 
         # Escreve o insert da zona no arquivo de saída
-        out_file.write(f"INSERT INTO zona (custofixo, custoporentrega, nome, restrita, utilizaexpediente, utilizapernoite, agrupavel, tipo_solucao, sequencia, tipo_zona) "
-                       f"SELECT 0, 0, '{layer}', 'true', 'false', 'false', 'false', 'TODAS', 99999, 'SIMULACAO' WHERE NOT EXISTS "
-                       f"(SELECT 1 FROM zona WHERE nome = '{layer}');\n")
+        if planner:
+            out_file.write(f"INSERT INTO zona (ativo, estimativadepeso, nome, peso_maximo, quantidadedeclientes, semanaentrega, diaentrega) "
+                           f"SELECT 'true', 0, '{layer}', 9999999, 0, '-----', 'NNNNNNN' WHERE NOT EXISTS "
+                           f"(SELECT 1 FROM zona WHERE nome = '{layer}');\n")
+            coordenada_insert = "INSERT INTO coordenada(latitude, longitude, zona_id) "
+        else:
+            out_file.write(f"INSERT INTO zona (custofixo, custoporentrega, nome, restrita, utilizaexpediente, utilizapernoite, agrupavel, tipo_solucao, sequencia, tipo_zona) "
+                           f"SELECT 0, 0, '{layer}', 'true', 'false', 'false', 'false', 'TODAS', 99999, 'SIMULACAO' WHERE NOT EXISTS "
+                           f"(SELECT 1 FROM zona WHERE nome = '{layer}');\n")
+            coordenada_insert = "INSERT INTO coordenada(latitude, longitude, id_zona) "
 
         # Escreve os inserts das coordenada no arquivo de saída
         for longitude, latitude in coordinates:
             print(f"Insert gerado para {name}, {layer}, Lat: {latitude}, Lon: {longitude}")
-            out_file.write(f"INSERT INTO coordenada(latitude, longitude, id_zona) "
+            out_file.write(f"{coordenada_insert}"
                            f"VALUES({latitude}, {longitude}, (SELECT id FROM zona WHERE nome = '{layer}'));\n")
 
         processed_count += 1
@@ -477,12 +486,13 @@ def get_kml_files_from_directory(directory_path):
     print(f"📁 Encontrados {len(kml_files)} arquivos KML no diretório {directory_path}")
     return sorted(kml_files)
 
-def process_directory(directory_path):
+def process_directory(directory_path, planner=False):
     """
     Processa todos os arquivos KML em um diretório.
     
     Args:
         directory_path (str): Caminho do diretório
+        planner (bool): Gera os inserts no formato Planner
     
     Returns:
         dict: Estatísticas do processamento
@@ -499,7 +509,7 @@ def process_directory(directory_path):
     for i, kml_file in enumerate(kml_files, 1):
         print(f"📄 [{i}/{len(kml_files)}] Processando: {os.path.basename(kml_file)}")
         
-        result = process_kml_file(kml_file)
+        result = process_kml_file(kml_file, planner)
         if result:
             stats["success"] += 1
         else:
@@ -576,6 +586,12 @@ Exemplos de uso:
         help="Processa todos os arquivos KML de um diretório"
     )
     
+    parser.add_argument(
+        "--planner",
+        action="store_true",
+        help="Gera os inserts no formato Planner"
+    )
+    
     return parser
 
 def main():
@@ -595,13 +611,13 @@ def main():
             print(f"⚠️ Aviso: O arquivo {args.file} não possui extensão .kml")
         
         print(f"📄 Processando arquivo único: {args.file}")
-        success = process_kml_file(args.file)
+        success = process_kml_file(args.file, args.planner)
         return 0 if success else 1
     
     elif args.directory:
         # Modo diretório
         print(f"📁 Processando diretório: {args.directory}")
-        stats = process_directory(args.directory)
+        stats = process_directory(args.directory, args.planner)
         print_summary(stats)
         return 0 if (stats["errors"] + stats["no_valid_layers"]) == 0 else 1
 

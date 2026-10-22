@@ -120,6 +120,10 @@
                                 <button type="submit" class="btn btn-primary btn-lg" id="single-submit-btn" disabled>
                                     <i class="bi bi-gear me-1"></i>Converter para SQL
                                 </button>
+                                <div class="form-check form-check-inline ms-3 align-middle">
+                                    <input class="form-check-input" type="checkbox" id="single-planner">
+                                    <label class="form-check-label" for="single-planner">Planner?</label>
+                                </div>
                             </div>
                         </form>
                         
@@ -162,6 +166,10 @@
                                 <button type="submit" class="btn btn-primary btn-lg" id="multiple-submit-btn" disabled>
                                     <i class="bi bi-gear me-1"></i>Converter Todos para SQL
                                 </button>
+                                <div class="form-check form-check-inline ms-3 align-middle">
+                                    <input class="form-check-input" type="checkbox" id="multiple-planner">
+                                    <label class="form-check-label" for="multiple-planner">Planner?</label>
+                                </div>
                             </div>
                         </form>
                         
@@ -338,6 +346,7 @@
             }
             
             formData.append('file', fileInput.files[0]);
+            formData.append('planner', document.getElementById('single-planner').checked);
             
             showProgress('single-progress');
             document.getElementById('single-submit-btn').disabled = true;
@@ -384,6 +393,7 @@
             for (let file of fileInput.files) {
                 formData.append('files[]', file);
             }
+            formData.append('planner', document.getElementById('multiple-planner').checked);
             
             showProgress('multiple-progress');
             document.getElementById('multiple-submit-btn').disabled = true;

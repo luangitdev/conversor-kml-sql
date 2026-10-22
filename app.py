@@ -52,6 +52,8 @@ def upload_single_file():
     if file.filename == '':
         return jsonify({'success': False, 'error': 'Nenhum arquivo selecionado'})
     
+    planner = request.form.get('planner') == 'true'
+    
     if file and allowed_file(file.filename):
         # Limpa arquivos antigos
         clean_old_files()
@@ -67,7 +69,7 @@ def upload_single_file():
             original_cwd = os.getcwd()
             os.chdir(RESULTS_FOLDER)
             
-            success = process_kml_file(os.path.join('..', file_path))
+            success = process_kml_file(os.path.join('..', file_path), planner)
             
             os.chdir(original_cwd)
             
@@ -105,6 +107,8 @@ def upload_multiple_files():
     if not files or all(f.filename == '' for f in files):
         return jsonify({'success': False, 'error': 'Nenhum arquivo selecionado'})
     
+    planner = request.form.get('planner') == 'true'
+    
     # Limpa arquivos antigos
     clean_old_files()
     
@@ -130,7 +134,7 @@ def upload_multiple_files():
         original_cwd = os.getcwd()
         os.chdir(RESULTS_FOLDER)
         
-        stats = process_directory(os.path.join('..', upload_dir))
+        stats = process_directory(os.path.join('..', upload_dir), planner)
         
         os.chdir(original_cwd)
         
